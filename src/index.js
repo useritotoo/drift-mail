@@ -29,75 +29,93 @@ async function getJwtSecret(env) {
 
 async function initDatabase(env) {
   if (!env.MAIL_KV || !env.DB) {
-    console.error('Missing bindings: MAIL_KV=', !!env.MAIL_KV, 'DB=', !!env.DB);
-    return;
+    throw new Error('Missing bindings: MAIL_KV=' + !!env.MAIL_KV + ', DB=' + !!env.DB);
   }
   
   // 检查是否已初始化
   const initialized = await env.MAIL_KV.get('db_initialized');
-  if (initialized) return;
+  if (initialized) {
+    console.log('Database already initialized');
+    return;
+  }
+
+  console.log('Starting database initialization...');
+  
+  // 分步创建表
+  const tables = [
+    `CREATE TABLE IF NOT EXISTS domains (
+      id TEXT PRIMARY KEY,
+      domain TEXT UNIQUE NOT NULL,
+      is_verified INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS accounts (
+      id TEXT PRIMARY KEY,
+      address TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      token TEXT,
+      expires_at TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      msgid TEXT,
+      account_id TEXT NOT NULL,
+      from_name TEXT,
+      from_address TEXT,
+      to_address TEXT,
+      subject TEXT,
+      text TEXT,
+      html TEXT,
+      seen INTEGER DEFAULT 0,
+      has_attachments INTEGER DEFAULT 0,
+      size INTEGER DEFAULT 0,
+      raw_source TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+    )`,
+    `CREATE TABLE IF NOT EXISTS attachments (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      filename TEXT,
+      content_type TEXT,
+      size INTEGER,
+      content TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+    )`
+  ];
+
+  const indexes = [
+    `CREATE INDEX IF NOT EXISTS idx_accounts_expires_at ON accounts(expires_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_accounts_address ON accounts(address)`,
+    `CREATE INDEX IF NOT EXISTS idx_messages_account_id ON messages(account_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)`
+  ];
 
   try {
     // 创建表
-    await env.DB.exec(`
-      CREATE TABLE IF NOT EXISTS domains (
-        id TEXT PRIMARY KEY,
-        domain TEXT UNIQUE NOT NULL,
-        is_verified INTEGER DEFAULT 1,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
-      );
-      
-      CREATE TABLE IF NOT EXISTS accounts (
-        id TEXT PRIMARY KEY,
-        address TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        token TEXT,
-        expires_at TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
-      );
-      
-      CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY,
-        msgid TEXT,
-        account_id TEXT NOT NULL,
-        from_name TEXT,
-        from_address TEXT,
-        to_address TEXT,
-        subject TEXT,
-        text TEXT,
-        html TEXT,
-        seen INTEGER DEFAULT 0,
-        has_attachments INTEGER DEFAULT 0,
-        size INTEGER DEFAULT 0,
-        raw_source TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-      );
-      
-      CREATE TABLE IF NOT EXISTS attachments (
-        id TEXT PRIMARY KEY,
-        message_id TEXT NOT NULL,
-        filename TEXT,
-        content_type TEXT,
-        size INTEGER,
-        content TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
-      );
-      
-      CREATE INDEX IF NOT EXISTS idx_accounts_expires_at ON accounts(expires_at);
-      CREATE INDEX IF NOT EXISTS idx_accounts_address ON accounts(address);
-      CREATE INDEX IF NOT EXISTS idx_messages_account_id ON messages(account_id);
-      CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
-    `);
+    for (const sql of tables) {
+      await env.DB.prepare(sql).run();
+    }
+    console.log('Tables created');
+    
+    // 创建索引
+    for (const sql of indexes) {
+      await env.DB.prepare(sql).run();
+    }
+    console.log('Indexes created');
 
     // 标记已初始化
     await env.MAIL_KV.put('db_initialized', 'true');
     console.log('Database initialized successfully');
   } catch (error) {
     console.error('Database initialization failed:', error);
+    throw error;
+  }
+}
   }
 }
 
