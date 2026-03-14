@@ -33,15 +33,15 @@
 
 在 [Cloudflare Dashboard](https://dash.cloudflare.com) 创建：
 
-- **D1 数据库**：Workers & Pages → D1 → 创建数据库
-- **KV 命名空间**：Workers & Pages → KV → 创建命名空间
+- **D1 数据库**：Workers & Pages → D1 → 创建数据库(名字随便你喜欢就好)
+- **KV 命名空间**：Workers & Pages → KV → 创建命名空间（名字随便你喜欢就好）
 
 ### 2. 连接 GitHub 部署
 
 1. Workers & Pages → 创建 → 连接 Git
 2. 选择 GitHub 仓库
-3. 框架预设选择 `None`
-4. 点击保存并部署
+3. 啥也不用改点击下一步
+4. 啥也不用改点击部署
 
 ### 3. 绑定资源
 
@@ -49,11 +49,11 @@
 
 **Bindings → D1 数据库绑定：**
 - 变量名：`DB`
-- 选择创建的数据库
+- 选择你刚刚创建的数据库
 
 **Bindings → KV 命名空间绑定：**
 - 变量名：`MAIL_KV`
-- 选择创建的命名空间
+- 选择你刚刚创建的命名空间
 
 ### 4. 设置环境变量
 
