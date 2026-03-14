@@ -1,0 +1,19 @@
+name = "temp-mail"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "temp-mail-db"
+database_id = "dd25b8df-4bd2-4092-b775-7a482bebb301"
+
+[[kv_namespaces]]
+binding = "MAIL_KV"
+id = "bf511b4742b141fba82178f179e110d7"
+
+[assets]
+directory = "public"
+binding = "ASSETS"
+
+[triggers]
+crons = ["*/5 * * * *"]
