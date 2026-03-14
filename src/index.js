@@ -8,6 +8,10 @@ import { SignJWT, jwtVerify } from './jwt.js';
 // ============ JWT Secret 管理 ============
 
 async function getJwtSecret(env) {
+  if (!env.MAIL_KV) {
+    throw new Error('MAIL_KV not bound. Please bind KV namespace in Dashboard.');
+  }
+  
   // 优先使用环境变量
   if (env.JWT_SECRET) return env.JWT_SECRET;
   
@@ -24,6 +28,11 @@ async function getJwtSecret(env) {
 // ============ 数据库初始化 ============
 
 async function initDatabase(env) {
+  if (!env.MAIL_KV || !env.DB) {
+    console.error('Missing bindings: MAIL_KV=', !!env.MAIL_KV, 'DB=', !!env.DB);
+    return;
+  }
+  
   // 检查是否已初始化
   const initialized = await env.MAIL_KV.get('db_initialized');
   if (initialized) return;
