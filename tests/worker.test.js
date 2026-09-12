@@ -10,6 +10,8 @@ function createDbMock(options = {}) {
   const insertedAttachments = [];
   const accounts = options.accounts || [];
   const domains = options.domains || [];
+  const messages = options.messages || [];
+  const attachments = options.attachments || [];
 
   function createStatement(sql) {
     const normalized = sql.replace(/\s+/g, ' ').trim();
@@ -54,6 +56,69 @@ function createDbMock(options = {}) {
           }
           return {
             results: accounts.filter((account) => account.address === boundArgs[0]),
+          };
+        }
+
+        if (/FROM accounts a/i.test(normalized) && /LEFT JOIN messages m/i.test(normalized)) {
+          if (!existingObjects.has('accounts')) {
+            throw new Error('no such table: accounts');
+          }
+          return {
+            results: accounts.map((account) => ({
+              ...account,
+              message_count: messages.filter((message) => message.account_id === account.id).length,
+              unread_count: messages.filter((message) => message.account_id === account.id && !message.seen).length,
+            })),
+          };
+        }
+
+        if (/SELECT COUNT\(\*\) as total FROM messages WHERE account_id = \?/i.test(normalized)) {
+          return {
+            results: [{
+              total: messages.filter((message) => message.account_id === boundArgs[0]).length,
+            }],
+          };
+        }
+
+        if (/SELECT COUNT\(\*\) as total FROM messages$/i.test(normalized)) {
+          return { results: [{ total: messages.length }] };
+        }
+
+        if (/FROM messages WHERE account_id = \? ORDER BY created_at DESC/i.test(normalized)) {
+          const limit = boundArgs[1] ?? messages.length;
+          const offset = boundArgs[2] ?? 0;
+          return {
+            results: messages
+              .filter((message) => message.account_id === boundArgs[0])
+              .slice(offset, offset + limit),
+          };
+        }
+
+        if (/FROM messages ORDER BY created_at DESC/i.test(normalized)) {
+          const limit = boundArgs[0] ?? messages.length;
+          const offset = boundArgs[1] ?? 0;
+          return { results: messages.slice(offset, offset + limit) };
+        }
+
+        if (/SELECT \* FROM messages WHERE id = \? AND account_id = \?/i.test(normalized)) {
+          return {
+            results: messages.filter((message) => (
+              message.id === boundArgs[0] && message.account_id === boundArgs[1]
+            )),
+          };
+        }
+
+        if (/SELECT \* FROM messages WHERE id = \?/i.test(normalized)) {
+          return { results: messages.filter((message) => message.id === boundArgs[0]) };
+        }
+
+        if (/SELECT id FROM messages WHERE id = \?/i.test(normalized)) {
+          return { results: messages.filter((message) => message.id === boundArgs[0]).map((message) => ({ id: message.id })) };
+        }
+
+        if (/SELECT id, filename, content_type, size FROM attachments WHERE message_id = \?/i.test(normalized)) {
+          return {
+            results: attachments.filter((attachment) => attachment.message_id === boundArgs[0]),
           };
         }
 
@@ -291,4 +356,122 @@ test('API timestamps are normalized from SQLite UTC to ISO 8601 UTC', async () =
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body['hydra:member'][0].createdAt, '2024-06-01T08:30:00.000Z');
+});
+
+function adminTestMessage(overrides = {}) {
+  return {
+    id: 'msg-1',
+    msgid: '<msg-1@example.com>',
+    account_id: 'acc-1',
+    subject: 'Hello',
+    from_name: 'Sender',
+    from_address: 'sender@example.com',
+    to_address: 'one@example.com',
+    seen: 0,
+    has_attachments: 0,
+    size: 12,
+    text: 'body',
+    html: null,
+    created_at: '2024-06-01 08:30:00',
+    ...overrides,
+  };
+}
+
+test('admin message routes require ACCESS_KEY', async () => {
+  const env = {
+    ACCESS_KEY: 'secret',
+    DB: createDbMock(),
+    MAIL_KV: {
+      async get(key) {
+        return key === 'db_initialized' ? 'true' : null;
+      },
+      async put() {},
+    },
+  };
+
+  const response = await worker.fetch(
+    new Request('https://example.com/api/admin/messages'),
+    env,
+    {},
+  );
+
+  assert.equal(response.status, 401);
+});
+
+test('admin can list messages from every mailbox', async () => {
+  const db = createDbMock({
+    accounts: [
+      { id: 'acc-1', address: 'one@example.com', expires_at: '2024-06-01 10:00:00', created_at: '2024-06-01 08:00:00' },
+      { id: 'acc-2', address: 'two@example.com', expires_at: '2024-06-01 10:00:00', created_at: '2024-06-01 08:10:00' },
+    ],
+    messages: [
+      adminTestMessage(),
+      adminTestMessage({
+        id: 'msg-2',
+        account_id: 'acc-2',
+        subject: 'Second',
+        to_address: 'two@example.com',
+        seen: 1,
+      }),
+    ],
+  });
+  const env = {
+    ACCESS_KEY: 'secret',
+    DB: db,
+    MAIL_KV: {
+      async get(key) {
+        return key === 'db_initialized' ? 'true' : null;
+      },
+      async put() {},
+    },
+  };
+
+  const listResponse = await worker.fetch(
+    new Request('https://example.com/api/admin/messages', {
+      headers: { 'X-Access-Key': 'secret' },
+    }),
+    env,
+    {},
+  );
+  assert.equal(listResponse.status, 200);
+  const listBody = await listResponse.json();
+  assert.equal(listBody['hydra:totalItems'], 2);
+  assert.equal(listBody['hydra:member'].length, 2);
+  assert.equal(listBody['hydra:member'][0].to[0].address, 'one@example.com');
+  assert.equal(listBody['hydra:member'][0].createdAt, '2024-06-01T08:30:00.000Z');
+
+  const filteredResponse = await worker.fetch(
+    new Request('https://example.com/api/admin/messages?accountId=acc-2', {
+      headers: { 'X-Access-Key': 'secret' },
+    }),
+    env,
+    {},
+  );
+  const filteredBody = await filteredResponse.json();
+  assert.equal(filteredBody['hydra:totalItems'], 1);
+  assert.equal(filteredBody['hydra:member'][0].id, 'msg-2');
+
+  const accountsResponse = await worker.fetch(
+    new Request('https://example.com/api/admin/accounts', {
+      headers: { 'X-Access-Key': 'secret' },
+    }),
+    env,
+    {},
+  );
+  const accountsBody = await accountsResponse.json();
+  assert.equal(accountsBody['hydra:totalItems'], 2);
+  assert.equal(accountsBody['hydra:member'].find((account) => account.id === 'acc-1').messageCount, 1);
+  assert.equal(accountsBody['hydra:member'].find((account) => account.id === 'acc-2').address, 'two@example.com');
+
+  const detailResponse = await worker.fetch(
+    new Request('https://example.com/api/admin/messages/msg-2', {
+      headers: { 'X-Access-Key': 'secret' },
+    }),
+    env,
+    {},
+  );
+  assert.equal(detailResponse.status, 200);
+  const detailBody = await detailResponse.json();
+  assert.equal(detailBody.subject, 'Second');
+  assert.equal(detailBody.to[0].address, 'two@example.com');
 });

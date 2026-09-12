@@ -678,16 +678,53 @@ function parseEmailContent(rawEmail) {
   return { text, html, attachments, headers: mainHeaders };
 }
 
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Access-Key',
+};
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      ...CORS_HEADERS,
     },
   });
+}
+
+function serializeMessageSummary(m) {
+  return {
+    id: m.id,
+    msgid: m.msgid,
+    accountId: m.account_id,
+    from: { name: decodeHeaderValue(m.from_name), address: m.from_address },
+    to: [{ name: '', address: m.to_address }],
+    subject: decodeHeaderValue(m.subject),
+    seen: !!m.seen,
+    hasAttachments: !!m.has_attachments,
+    size: m.size,
+    createdAt: toIsoUtc(m.created_at),
+  };
+}
+
+async function serializeMessageDetail(env, msg) {
+  const { results: attachments } = await env.DB.prepare(
+    'SELECT id, filename, content_type, size FROM attachments WHERE message_id = ?'
+  ).bind(msg.id).all();
+
+  return {
+    ...serializeMessageSummary(msg),
+    text: msg.text,
+    html: msg.html ? [msg.html] : [],
+    attachments: attachments.map(a => ({
+      id: a.id,
+      filename: decodeHeaderValue(a.filename),
+      contentType: a.content_type,
+      size: a.size,
+    })),
+  };
 }
 
 function error(message, status = 400) {
@@ -963,7 +1000,7 @@ async function getMessages(request, env) {
   const offset = (page - 1) * limit;
 
   const { results } = await env.DB.prepare(
-    `SELECT id, msgid, subject, from_name, from_address, to_address, seen, has_attachments, size, created_at
+    `SELECT id, msgid, account_id, subject, from_name, from_address, to_address, seen, has_attachments, size, created_at
      FROM messages WHERE account_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`
   ).bind(user.id, limit, offset).all();
 
@@ -972,17 +1009,7 @@ async function getMessages(request, env) {
   ).bind(user.id).all();
 
   return json({
-    'hydra:member': results.map(m => ({
-      id: m.id,
-      msgid: m.msgid,
-      from: { name: decodeHeaderValue(m.from_name), address: m.from_address },
-      to: [{ name: '', address: m.to_address }],
-      subject: decodeHeaderValue(m.subject),
-      seen: !!m.seen,
-      hasAttachments: !!m.has_attachments,
-      size: m.size,
-      createdAt: toIsoUtc(m.created_at),
-    })),
+    'hydra:member': results.map(serializeMessageSummary),
     'hydra:totalItems': countResult[0]?.total || 0,
   });
 }
@@ -1002,32 +1029,7 @@ async function getMessage(request, env, id) {
     return error('Message not found', 404);
   }
 
-  const msg = results[0];
-
-  // 获取附件
-  const { results: attachments } = await env.DB.prepare(
-    'SELECT id, filename, content_type, size FROM attachments WHERE message_id = ?'
-  ).bind(id).all();
-
-  return json({
-    id: msg.id,
-    msgid: msg.msgid,
-    from: { name: decodeHeaderValue(msg.from_name), address: msg.from_address },
-    to: [{ name: '', address: msg.to_address }],
-    subject: decodeHeaderValue(msg.subject),
-    text: msg.text,
-    html: msg.html ? [msg.html] : [],
-    seen: !!msg.seen,
-    hasAttachments: !!msg.has_attachments,
-    size: msg.size,
-    attachments: attachments.map(a => ({
-      id: a.id,
-      filename: decodeHeaderValue(a.filename),
-      contentType: a.content_type,
-      size: a.size,
-    })),
-    createdAt: toIsoUtc(msg.created_at),
-  });
+  return json(await serializeMessageDetail(env, results[0]));
 }
 
 // PATCH /messages/{id} - 标记已读
@@ -1104,6 +1106,126 @@ async function getAttachment(request, env, id) {
     headers: {
       'Content-Type': att.content_type,
       'Content-Disposition': `attachment; filename="${att.filename}"`,
+      ...CORS_HEADERS,
+    },
+  });
+}
+
+// ============ 管理员接口（ACCESS_KEY 可查看全部邮箱邮件） ============
+
+async function listAdminAccounts(request, env) {
+  const { results } = await env.DB.prepare(
+    `SELECT a.id, a.address, a.expires_at, a.created_at,
+            COUNT(m.id) as message_count,
+            SUM(CASE WHEN m.seen = 0 THEN 1 ELSE 0 END) as unread_count
+     FROM accounts a
+     LEFT JOIN messages m ON m.account_id = a.id
+     GROUP BY a.id, a.address, a.expires_at, a.created_at
+     ORDER BY a.created_at DESC`
+  ).all();
+
+  return json({
+    'hydra:member': results.map(a => ({
+      id: a.id,
+      address: a.address,
+      expiresAt: toIsoUtc(a.expires_at),
+      createdAt: toIsoUtc(a.created_at),
+      messageCount: Number(a.message_count) || 0,
+      unreadCount: Number(a.unread_count) || 0,
+    })),
+    'hydra:totalItems': results.length,
+  });
+}
+
+async function listAdminMessages(request, env) {
+  const url = new URL(request.url);
+  const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '50', 10) || 50));
+  const offset = (page - 1) * limit;
+  const accountId = url.searchParams.get('accountId');
+
+  let results;
+  let countResult;
+  if (accountId) {
+    ({ results } = await env.DB.prepare(
+      `SELECT id, msgid, account_id, subject, from_name, from_address, to_address, seen, has_attachments, size, created_at
+       FROM messages WHERE account_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`
+    ).bind(accountId, limit, offset).all());
+    ({ results: countResult } = await env.DB.prepare(
+      'SELECT COUNT(*) as total FROM messages WHERE account_id = ?'
+    ).bind(accountId).all());
+  } else {
+    ({ results } = await env.DB.prepare(
+      `SELECT id, msgid, account_id, subject, from_name, from_address, to_address, seen, has_attachments, size, created_at
+       FROM messages ORDER BY created_at DESC LIMIT ? OFFSET ?`
+    ).bind(limit, offset).all());
+    ({ results: countResult } = await env.DB.prepare(
+      'SELECT COUNT(*) as total FROM messages'
+    ).all());
+  }
+
+  return json({
+    'hydra:member': results.map(serializeMessageSummary),
+    'hydra:totalItems': countResult[0]?.total || 0,
+  });
+}
+
+async function getAdminMessage(request, env, id) {
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM messages WHERE id = ?'
+  ).bind(id).all();
+
+  if (results.length === 0) {
+    return error('Message not found', 404);
+  }
+
+  return json(await serializeMessageDetail(env, results[0]));
+}
+
+async function patchAdminMessage(request, env, id) {
+  const { results } = await env.DB.prepare(
+    'SELECT id FROM messages WHERE id = ?'
+  ).bind(id).all();
+
+  if (results.length === 0) {
+    return error('Message not found', 404);
+  }
+
+  await env.DB.prepare('UPDATE messages SET seen = 1 WHERE id = ?').bind(id).run();
+  return json({ seen: true });
+}
+
+async function deleteAdminMessage(request, env, id) {
+  const { results } = await env.DB.prepare(
+    'SELECT id FROM messages WHERE id = ?'
+  ).bind(id).all();
+
+  if (results.length === 0) {
+    return error('Message not found', 404);
+  }
+
+  await env.DB.prepare('DELETE FROM attachments WHERE message_id = ?').bind(id).run();
+  await env.DB.prepare('DELETE FROM messages WHERE id = ?').bind(id).run();
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
+}
+
+async function getAdminAttachment(request, env, id) {
+  const { results } = await env.DB.prepare(
+    'SELECT a.* FROM attachments a JOIN messages m ON a.message_id = m.id WHERE a.id = ?'
+  ).bind(id).all();
+
+  if (results.length === 0) {
+    return error('Attachment not found', 404);
+  }
+
+  const att = results[0];
+  const binary = Uint8Array.from(atob(att.content), c => c.charCodeAt(0));
+
+  return new Response(binary, {
+    headers: {
+      'Content-Type': att.content_type,
+      'Content-Disposition': `attachment; filename="${att.filename}"`,
+      ...CORS_HEADERS,
     },
   });
 }
@@ -1449,13 +1571,7 @@ async function handleRequest(request, env) {
 
   // CORS
   if (method === 'OPTIONS') {
-    return new Response(null, {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      },
-    });
+    return new Response(null, { headers: CORS_HEADERS });
   }
 
   // API 路由
@@ -1480,6 +1596,14 @@ async function handleRequest(request, env) {
       if (!verifyAccessKey(request, env)) return error('Unauthorized', 401);
       return createCustomEmail(request, env);
     }],
+    ['GET', '/api/admin/accounts', () => {
+      if (!verifyAccessKey(request, env)) return error('Unauthorized', 401);
+      return listAdminAccounts(request, env);
+    }],
+    ['GET', '/api/admin/messages', () => {
+      if (!verifyAccessKey(request, env)) return error('Unauthorized', 401);
+      return listAdminMessages(request, env);
+    }],
   ];
 
   // 匹配带 ID 的路由
@@ -1487,6 +1611,8 @@ async function handleRequest(request, env) {
   const sourceMatch = path.match(/^\/api\/sources\/([^/]+)$/);
   const attachmentMatch = path.match(/^\/api\/attachments\/([^/]+)$/);
   const accountMatch = path.match(/^\/api\/accounts\/([^/]+)$/);
+  const adminMessageMatch = path.match(/^\/api\/admin\/messages\/([^/]+)$/);
+  const adminAttachmentMatch = path.match(/^\/api\/admin\/attachments\/([^/]+)$/);
 
   if (messageIdMatch) {
     const id = messageIdMatch[1];
@@ -1505,6 +1631,19 @@ async function handleRequest(request, env) {
 
   if (accountMatch && method === 'DELETE') {
     return deleteAccount(request, env, accountMatch[1]);
+  }
+
+  if (adminMessageMatch) {
+    if (!verifyAccessKey(request, env)) return error('Unauthorized', 401);
+    const id = adminMessageMatch[1];
+    if (method === 'GET') return getAdminMessage(request, env, id);
+    if (method === 'PATCH') return patchAdminMessage(request, env, id);
+    if (method === 'DELETE') return deleteAdminMessage(request, env, id);
+  }
+
+  if (adminAttachmentMatch && method === 'GET') {
+    if (!verifyAccessKey(request, env)) return error('Unauthorized', 401);
+    return getAdminAttachment(request, env, adminAttachmentMatch[1]);
   }
 
   // 匹配简单路由

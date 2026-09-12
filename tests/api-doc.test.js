@@ -59,6 +59,8 @@ test('API docs include project integration examples for Base URL and ACCESS_KEY'
   assert.match(markdown, /ACCESS_KEY/);
   assert.match(markdown, /Promise\.all/);
   assert.match(markdown, /createTemporaryMailbox/);
+  assert.match(markdown, /## 管理员/);
+  assert.match(markdown, /GET \/api\/admin\/messages/);
   assert.match(docsView, /快速接入/);
   assert.match(docsView, /Base URL/);
   assert.match(docsView, /ACCESS_KEY/);

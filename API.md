@@ -419,6 +419,115 @@ Content-Disposition: attachment; filename="<文件名>"
 
 ---
 
+## 管理员
+
+使用 `X-Access-Key` 查看全部邮箱和邮件，不局限于当前登录的临时邮箱。
+
+### GET /api/admin/accounts
+
+获取全部邮箱账户。
+
+**请求头**:
+```
+X-Access-Key: your-access-key
+```
+
+**响应**:
+```json
+{
+  "hydra:member": [
+    {
+      "id": "uuid",
+      "address": "user@example.com",
+      "expiresAt": "2024-01-01T01:00:00Z",
+      "createdAt": "2024-01-01T00:00:00Z",
+      "messageCount": 3,
+      "unreadCount": 1
+    }
+  ],
+  "hydra:totalItems": 1
+}
+```
+
+---
+
+### GET /api/admin/messages
+
+获取全部邮箱的邮件列表。
+
+**请求头**:
+```
+X-Access-Key: your-access-key
+```
+
+**查询参数**:
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| page | number | 1 | 页码 |
+| limit | number | 50 | 每页数量，最大 100 |
+| accountId | string | 无 | 按邮箱账户过滤 |
+
+**响应**: 格式与 `GET /api/messages` 相同，额外包含 `accountId`。
+
+---
+
+### GET /api/admin/messages/{id}
+
+获取任意邮箱中的邮件详情。
+
+**请求头**:
+```
+X-Access-Key: your-access-key
+```
+
+**响应**: 格式与 `GET /api/messages/{id}` 相同。
+
+---
+
+### PATCH /api/admin/messages/{id}
+
+标记任意邮件为已读。
+
+**请求头**:
+```
+X-Access-Key: your-access-key
+```
+
+**响应**:
+```json
+{
+  "seen": true
+}
+```
+
+---
+
+### DELETE /api/admin/messages/{id}
+
+删除任意邮件。
+
+**请求头**:
+```
+X-Access-Key: your-access-key
+```
+
+**响应**: `204 No Content`
+
+---
+
+### GET /api/admin/attachments/{id}
+
+下载任意邮件的附件。
+
+**请求头**:
+```
+X-Access-Key: your-access-key
+```
+
+**响应**: 二进制文件流
+
+---
+
 ## 错误响应格式
 
 所有错误响应格式统一：

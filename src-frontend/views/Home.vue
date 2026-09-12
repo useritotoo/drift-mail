@@ -8,7 +8,7 @@ import { parseUtcDate, formatRelativeTime, formatLocalDateTime } from '@/utils/d
 import {
   Mail, RefreshCw, Clock, Copy, Trash2, Plus, LogOut, 
   Timer, Inbox, Paperclip, Download, X, ChevronRight,
-  Sparkles, Shield, Zap, FileText
+  Sparkles, Shield, Zap, FileText, Users
 } from 'lucide-vue-next'
 
 const router = useRouter()
@@ -26,6 +26,15 @@ const showDomainDropdown = ref(false)
 const mailIframe = ref(null)
 const showDeleteConfirm = ref(false)
 const deletingAccount = ref(false)
+const inboxMode = ref('current')
+const adminAccounts = ref([])
+const selectedAdminAccountId = ref('')
+const adminMailTotal = ref(0)
+
+const isAllInbox = computed(() => inboxMode.value === 'all')
+const visibleMailCount = computed(() => (
+  isAllInbox.value ? adminMailTotal.value : mailStore.mails.length
+))
 
 // 计算属性
 const formattedTime = computed(() => {
@@ -181,6 +190,7 @@ async function createNewEmail() {
     }
     
     mailStore.setSession(data)
+    inboxMode.value = 'current'
     startTimer()
     startAutoRefresh()
     toast.success('邮箱创建成功')
@@ -191,11 +201,72 @@ async function createNewEmail() {
   }
 }
 
+function syncAutoRefresh() {
+  if (isAllInbox.value || (mailStore.isAuthenticated && !mailStore.isExpired)) {
+    startAutoRefresh()
+    return
+  }
+  stopAutoRefresh()
+}
+
+async function setInboxMode(mode) {
+  if (inboxMode.value === mode) return
+  inboxMode.value = mode
+  showMail.value = null
+
+  if (mode === 'all') {
+    selectedAdminAccountId.value = ''
+    await refreshMails()
+    syncAutoRefresh()
+    return
+  }
+
+  if (mailStore.isAuthenticated && !mailStore.isExpired) {
+    await refreshMails()
+    syncAutoRefresh()
+    return
+  }
+
+  mailStore.setMails([])
+  stopAutoRefresh()
+}
+
+async function selectAdminAccount(accountId) {
+  if (selectedAdminAccountId.value === accountId) return
+  selectedAdminAccountId.value = accountId
+  showMail.value = null
+  await refreshMails()
+}
+
 async function refreshMails() {
+  if (isAllInbox.value) {
+    try {
+      const [accounts, messages] = await Promise.all([
+        api.getAdminAccounts(),
+        api.getAdminMessages({
+          accountId: selectedAdminAccountId.value || undefined,
+        }),
+      ])
+      adminAccounts.value = accounts
+      adminMailTotal.value = messages.total
+      if (
+        selectedAdminAccountId.value
+        && !accounts.some((account) => account.id === selectedAdminAccountId.value)
+      ) {
+        selectedAdminAccountId.value = ''
+      }
+      mailStore.setMails(messages.mails)
+    } catch (e) {
+      console.error('Failed to load admin mails:', e)
+    }
+    return
+  }
+
   if (!mailStore.token) return
   try {
-    const { mails } = await api.getMessages(mailStore.token)
+    const { mails, total } = await api.getMessages(mailStore.token)
     mailStore.setMails(mails)
+    adminMailTotal.value = total
   } catch (e) {
     console.error('Failed to load mails:', e)
   }
@@ -203,11 +274,17 @@ async function refreshMails() {
 
 async function openMail(mail) {
   try {
-    const fullMail = await api.getMessage(mail.id, mailStore.token)
+    const fullMail = isAllInbox.value
+      ? await api.getAdminMessage(mail.id)
+      : await api.getMessage(mail.id, mailStore.token)
     showMail.value = fullMail
     
     if (!mail.seen) {
-      await api.markAsRead(mail.id, mailStore.token)
+      if (isAllInbox.value) {
+        await api.markAdminMessageRead(mail.id)
+      } else {
+        await api.markAsRead(mail.id, mailStore.token)
+      }
       await refreshMails()
     }
   } catch (e) {
@@ -219,12 +296,35 @@ async function deleteMail() {
   if (!showMail.value) return
   
   try {
-    await api.deleteMessage(showMail.value.id, mailStore.token)
+    if (isAllInbox.value) {
+      await api.deleteAdminMessage(showMail.value.id)
+    } else {
+      await api.deleteMessage(showMail.value.id, mailStore.token)
+    }
     showMail.value = null
     await refreshMails()
     toast.success('邮件已删除')
   } catch (e) {
     toast.error('删除失败')
+  }
+}
+
+async function downloadAttachment(att) {
+  try {
+    const blob = await api.downloadAttachment(att.id, {
+      admin: isAllInbox.value,
+      token: mailStore.token,
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = att.filename || 'attachment'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    toast.error('下载失败')
   }
 }
 
@@ -286,6 +386,10 @@ async function copyEmail() {
 function logout() {
   showDeleteConfirm.value = false
   deletingAccount.value = false
+  inboxMode.value = 'current'
+  adminAccounts.value = []
+  selectedAdminAccountId.value = ''
+  adminMailTotal.value = 0
   mailStore.clearSession()
   mailStore.setMails([])
   customUsername.value = ''
@@ -339,6 +443,10 @@ function formatSize(bytes) {
 
 function getInitial(name) {
   return (name || '?')[0].toUpperCase()
+}
+
+function mailRecipient(mail) {
+  return mail?.to?.[0]?.address || ''
 }
 </script>
 
@@ -450,7 +558,11 @@ function getInitial(name) {
           <div class="flex items-center gap-6">
             <div class="flex items-center gap-1.5">
               <Inbox class="w-4 h-4" />
-              <span>{{ mailStore.mails.length }} 封邮件</span>
+              <span>{{ visibleMailCount }} 封邮件</span>
+            </div>
+            <div v-if="isAllInbox" class="flex items-center gap-1.5">
+              <Users class="w-4 h-4" />
+              <span>{{ adminAccounts.length }} 个邮箱</span>
             </div>
             <div class="flex items-center gap-1.5">
               <Mail class="w-4 h-4" />
@@ -472,12 +584,53 @@ function getInitial(name) {
       <div class="card flex-1 flex flex-col">
         <!-- 邮件列表视图 -->
         <div v-if="!showMail">
-          <div class="px-4 py-3 border-b border-white/5 flex items-center justify-between">
+          <div class="px-4 py-3 border-b border-white/5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <h2 class="font-semibold flex items-center gap-2">
               <Inbox class="w-4 h-4 text-dark-400" />
-              收件箱
+              {{ isAllInbox ? '全部邮件' : '收件箱' }}
             </h2>
-            <span class="text-xs text-dark-500">{{ mailStore.mails.length }} 封</span>
+            <div class="flex items-center gap-3">
+              <div class="flex rounded-lg border border-white/10 bg-dark-800/80 p-0.5">
+                <button
+                  type="button"
+                  class="btn-ghost btn-sm rounded-md px-3"
+                  :class="!isAllInbox ? 'bg-white/10 text-white' : 'text-dark-400'"
+                  @click="setInboxMode('current')"
+                >
+                  当前邮箱
+                </button>
+                <button
+                  type="button"
+                  class="btn-ghost btn-sm rounded-md px-3"
+                  :class="isAllInbox ? 'bg-white/10 text-white' : 'text-dark-400'"
+                  @click="setInboxMode('all')"
+                >
+                  全部邮件
+                </button>
+              </div>
+              <span class="text-xs text-dark-500">{{ visibleMailCount }} 封</span>
+            </div>
+          </div>
+          <div v-if="isAllInbox" class="px-4 py-3 border-b border-white/5 flex gap-2 overflow-x-auto">
+            <button
+              type="button"
+              class="flex-shrink-0 rounded-full border px-3 py-1 text-xs transition-colors"
+              :class="!selectedAdminAccountId ? 'border-primary-500/40 bg-primary-500/15 text-primary-200' : 'border-white/10 text-dark-400 hover:border-white/20 hover:text-dark-200'"
+              @click="selectAdminAccount('')"
+            >
+              全部邮箱
+            </button>
+            <button
+              v-for="account in adminAccounts"
+              :key="account.id"
+              type="button"
+              class="flex-shrink-0 rounded-full border px-3 py-1 text-xs transition-colors"
+              :class="selectedAdminAccountId === account.id ? 'border-primary-500/40 bg-primary-500/15 text-primary-200' : 'border-white/10 text-dark-400 hover:border-white/20 hover:text-dark-200'"
+              @click="selectAdminAccount(account.id)"
+            >
+              {{ account.address }}
+              <span class="ml-1 text-dark-500">{{ account.messageCount }}</span>
+            </button>
           </div>
           
           <div class="flex-1 overflow-y-auto">
@@ -506,6 +659,9 @@ function getInitial(name) {
                   <div class="text-sm truncate" :class="mail.seen ? 'text-dark-500' : 'text-dark-300'">
                     {{ mail.subject || '(无主题)' }}
                   </div>
+                  <div v-if="isAllInbox && mailRecipient(mail)" class="mt-1 truncate text-xs text-dark-500">
+                    收件 {{ mailRecipient(mail) }}
+                  </div>
                   <div v-if="mail.hasAttachments" class="flex items-center gap-1 mt-1">
                     <Paperclip class="w-3 h-3 text-dark-500" />
                     <span class="text-xs text-dark-500">有附件</span>
@@ -520,7 +676,7 @@ function getInitial(name) {
               <div class="flex flex-col items-center justify-center text-dark-500 py-16">
                 <Inbox class="w-16 h-16 mb-4 opacity-20" />
                 <p class="text-dark-400 mb-1">暂无邮件</p>
-                <p class="text-sm">新邮件将自动显示</p>
+                <p class="text-sm">{{ isAllInbox ? '所有邮箱的新邮件将自动显示' : '新邮件将自动显示' }}</p>
               </div>
             </template>
           </div>
@@ -551,6 +707,9 @@ function getInitial(name) {
               <div>
                 <div class="font-medium text-sm">{{ showMail.from.name || '未知发件人' }}</div>
                 <div class="text-xs text-dark-500">{{ showMail.from.address }}</div>
+                <div v-if="isAllInbox && mailRecipient(showMail)" class="text-xs text-dark-500">
+                  发至 {{ mailRecipient(showMail) }}
+                </div>
               </div>
               <div class="ml-auto text-xs text-dark-500">
                 {{ formatLocalDateTime(showMail.createdAt) }}
@@ -577,18 +736,17 @@ function getInitial(name) {
           <div v-if="showMail.attachments?.length > 0" class="px-4 py-3 border-t border-white/5">
             <div class="text-xs text-dark-500 mb-2">附件 ({{ showMail.attachments.length }})</div>
             <div class="space-y-1.5">
-              <a
+              <button
                 v-for="att in showMail.attachments"
                 :key="att.id"
-                :href="api.getAttachmentUrl(att.id)"
-                :download="att.filename"
-                target="_blank"
-                class="flex items-center gap-2 px-3 py-2 rounded-lg bg-dark-800/50 hover:bg-dark-700/50 transition-colors"
+                type="button"
+                class="flex w-full items-center gap-2 px-3 py-2 rounded-lg bg-dark-800/50 hover:bg-dark-700/50 transition-colors text-left"
+                @click="downloadAttachment(att)"
               >
                 <Download class="w-4 h-4 text-dark-400" />
                 <span class="text-sm truncate flex-1">{{ att.filename }}</span>
                 <span class="text-xs text-dark-500">{{ formatSize(att.size) }}</span>
-              </a>
+              </button>
             </div>
           </div>
         </div>

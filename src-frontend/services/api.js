@@ -141,6 +141,50 @@ export const api = {
   getAttachmentUrl(id) {
     return `${API_BASE}/attachments/${id}`
   },
+
+  async downloadAttachment(id, { admin = false, token } = {}) {
+    const headers = {}
+    const accessKey = getAccessKey()
+    if (accessKey) headers['X-Access-Key'] = accessKey
+    if (!admin && token) headers.Authorization = `Bearer ${token}`
+
+    const response = await fetch(
+      admin ? `${API_BASE}/admin/attachments/${id}` : `${API_BASE}/attachments/${id}`,
+      { headers },
+    )
+    if (!response.ok) {
+      throw new ApiError('Download failed', response.status)
+    }
+    return response.blob()
+  },
+
+  // 管理员：查看全部邮箱与邮件
+  async getAdminAccounts() {
+    const data = await request('/admin/accounts')
+    return data['hydra:member'] || []
+  },
+
+  async getAdminMessages({ page = 1, accountId, limit = 50 } = {}) {
+    const params = new URLSearchParams({ page: String(page), limit: String(limit) })
+    if (accountId) params.set('accountId', accountId)
+    const data = await request(`/admin/messages?${params}`)
+    return {
+      mails: data['hydra:member'] || [],
+      total: data['hydra:totalItems'] || 0,
+    }
+  },
+
+  async getAdminMessage(id) {
+    return request(`/admin/messages/${id}`)
+  },
+
+  async markAdminMessageRead(id) {
+    return request(`/admin/messages/${id}`, { method: 'PATCH' })
+  },
+
+  async deleteAdminMessage(id) {
+    return request(`/admin/messages/${id}`, { method: 'DELETE' })
+  },
 }
 
 export { ApiError }
