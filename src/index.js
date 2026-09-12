@@ -4,6 +4,15 @@
  */
 
 import { SignJWT, jwtVerify } from './jwt.js';
+import { toIsoUtc, toSqliteUtc } from './datetime.js';
+
+function isNotExpiredSql(column = 'expires_at') {
+  return `datetime(replace(replace(${column}, 'T', ' '), 'Z', '')) > datetime('now')`;
+}
+
+function isExpiredSql(column = 'expires_at') {
+  return `datetime(replace(replace(${column}, 'T', ' '), 'Z', '')) < datetime('now')`;
+}
 
 const SCHEMA_TABLES = [
   `CREATE TABLE IF NOT EXISTS domains (
@@ -709,7 +718,7 @@ async function getAuthUser(request, env) {
 
   // 检查是否是数据库中的有效 token
   const { results } = await env.DB.prepare(
-    'SELECT * FROM accounts WHERE token = ? AND expires_at > datetime("now")'
+    `SELECT * FROM accounts WHERE token = ? AND ${isNotExpiredSql()}`
   ).bind(token).all();
 
   return results[0] || null;
@@ -771,7 +780,7 @@ async function getDomains(request, env) {
       id: d.id,
       domain: d.domain,
       isVerified: !!d.is_verified,
-      createdAt: d.created_at,
+      createdAt: toIsoUtc(d.created_at),
     })),
     'hydra:totalItems': results.length,
   });
@@ -805,7 +814,7 @@ async function createAccount(request, env) {
 
   // 计算过期时间
   const expireMinutes = parseInt(env.EXPIRE_MINUTES || '30');
-  const expiresAt = new Date(Date.now() + expireMinutes * 60 * 1000).toISOString();
+  const expiresAt = toIsoUtc(new Date(Date.now() + expireMinutes * 60 * 1000));
 
   // 生成 token
   const secret = await getJwtSecret(env);
@@ -820,14 +829,14 @@ async function createAccount(request, env) {
     await env.DB.prepare(
       `INSERT INTO accounts (id, address, password_hash, token, expires_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
-    ).bind(id, address, hashPassword(password), token, expiresAt).run();
+    ).bind(id, address, hashPassword(password), token, toSqliteUtc(expiresAt)).run();
 
     return json({
       id,
       address,
       authType: 'email',
       expiresAt,
-      createdAt: new Date().toISOString(),
+      createdAt: toIsoUtc(new Date()),
     }, 201);
   } catch (e) {
     if (e.message.includes('UNIQUE constraint')) {
@@ -847,7 +856,7 @@ async function getTokenHandler(request, env) {
   }
 
   const { results } = await env.DB.prepare(
-    'SELECT * FROM accounts WHERE address = ? AND password_hash = ? AND expires_at > datetime("now")'
+    `SELECT * FROM accounts WHERE address = ? AND password_hash = ? AND ${isNotExpiredSql()}`
   ).bind(address, hashPassword(password)).all();
 
   if (results.length === 0) {
@@ -858,7 +867,7 @@ async function getTokenHandler(request, env) {
 
   // 刷新 token 过期时间
   const expireMinutes = parseInt(env.EXPIRE_MINUTES || '30');
-  const expiresAt = new Date(Date.now() + expireMinutes * 60 * 1000).toISOString();
+  const expiresAt = toIsoUtc(new Date(Date.now() + expireMinutes * 60 * 1000));
 
   const secret = await getJwtSecret(env);
   const token = await new SignJWT({ address, id: account.id })
@@ -869,7 +878,7 @@ async function getTokenHandler(request, env) {
 
   await env.DB.prepare(
     'UPDATE accounts SET token = ?, expires_at = ?, updated_at = datetime("now") WHERE id = ?'
-  ).bind(token, expiresAt, account.id).run();
+  ).bind(token, toSqliteUtc(expiresAt), account.id).run();
 
   return json({
     id: account.id,
@@ -889,8 +898,8 @@ async function getMe(request, env) {
     id: user.id,
     address: user.address,
     authType: 'email',
-    expiresAt: user.expires_at,
-    createdAt: user.created_at,
+    expiresAt: toIsoUtc(user.expires_at),
+    createdAt: toIsoUtc(user.created_at),
   });
 }
 
@@ -904,11 +913,11 @@ async function extendExpiry(request, env) {
   const body = await request.json().catch(() => ({}));
   const minutes = body.minutes || 30;
 
-  const newExpiresAt = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+  const newExpiresAt = toIsoUtc(new Date(Date.now() + minutes * 60 * 1000));
 
   await env.DB.prepare(
     'UPDATE accounts SET expires_at = ?, updated_at = datetime("now") WHERE id = ?'
-  ).bind(newExpiresAt, user.id).run();
+  ).bind(toSqliteUtc(newExpiresAt), user.id).run();
 
   return json({
     success: true,
@@ -972,7 +981,7 @@ async function getMessages(request, env) {
       seen: !!m.seen,
       hasAttachments: !!m.has_attachments,
       size: m.size,
-      createdAt: m.created_at,
+      createdAt: toIsoUtc(m.created_at),
     })),
     'hydra:totalItems': countResult[0]?.total || 0,
   });
@@ -1017,7 +1026,7 @@ async function getMessage(request, env, id) {
       contentType: a.content_type,
       size: a.size,
     })),
-    createdAt: msg.created_at,
+    createdAt: toIsoUtc(msg.created_at),
   });
 }
 
@@ -1103,7 +1112,7 @@ async function getAttachment(request, env, id) {
 
 async function cleanupExpired(env) {
   const { results: expiredAccounts } = await env.DB.prepare(
-    'SELECT id FROM accounts WHERE expires_at < datetime("now")'
+    `SELECT id FROM accounts WHERE ${isExpiredSql()}`
   ).all();
 
   for (const account of expiredAccounts) {
@@ -1198,7 +1207,7 @@ async function generateRandomEmail(request, env) {
 
 
 
-    const expiresAt = new Date(Date.now() + expireMinutes * 60 * 1000).toISOString();
+    const expiresAt = toIsoUtc(new Date(Date.now() + expireMinutes * 60 * 1000));
 
 
 
@@ -1246,7 +1255,7 @@ async function generateRandomEmail(request, env) {
 
        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
 
-    ).bind(id, address, hashPassword(password), token, expiresAt).run();
+    ).bind(id, address, hashPassword(password), token, toSqliteUtc(expiresAt)).run();
 
 
 
@@ -1358,7 +1367,7 @@ async function createCustomEmail(request, env) {
 
 
 
-    const expiresAt = new Date(Date.now() + expireMinutes * 60 * 1000).toISOString();
+    const expiresAt = toIsoUtc(new Date(Date.now() + expireMinutes * 60 * 1000));
 
 
 
@@ -1400,7 +1409,7 @@ async function createCustomEmail(request, env) {
 
        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
 
-    ).bind(id, address, hashPassword(password), token, expiresAt).run();
+    ).bind(id, address, hashPassword(password), token, toSqliteUtc(expiresAt)).run();
 
 
 
@@ -1542,7 +1551,7 @@ export default {
 
     // 查找账户
     const { results } = await env.DB.prepare(
-      'SELECT * FROM accounts WHERE address = ? AND expires_at > datetime("now")'
+      `SELECT * FROM accounts WHERE address = ? AND ${isNotExpiredSql()}`
     ).bind(to).all();
 
     if (results.length === 0) {

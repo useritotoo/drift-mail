@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { parseUtcDate, toIsoUtc } from '@/utils/datetime'
 
 export const useMailStore = defineStore('mail', () => {
   // 状态
@@ -17,8 +18,9 @@ export const useMailStore = defineStore('mail', () => {
   
   const remainingTime = computed(() => {
     if (!expiresAt.value) return 0
-    const diff = new Date(expiresAt.value) - new Date()
-    return Math.max(0, diff)
+    const expires = parseUtcDate(expiresAt.value)
+    if (!expires) return 0
+    return Math.max(0, expires.getTime() - Date.now())
   })
 
   const isExpired = computed(() => remainingTime.value <= 0)
@@ -69,7 +71,7 @@ export const useMailStore = defineStore('mail', () => {
   }
 
   function extendExpiry(minutes = 30) {
-    const newExpiresAt = new Date(Date.now() + minutes * 60 * 1000).toISOString()
+    const newExpiresAt = toIsoUtc(new Date(Date.now() + minutes * 60 * 1000))
     expiresAt.value = newExpiresAt
     localStorage.setItem('tm_expiresAt', newExpiresAt)
   }

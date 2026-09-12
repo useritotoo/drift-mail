@@ -9,6 +9,7 @@ function createDbMock(options = {}) {
   const insertedMessages = [];
   const insertedAttachments = [];
   const accounts = options.accounts || [];
+  const domains = options.domains || [];
 
   function createStatement(sql) {
     const normalized = sql.replace(/\s+/g, ' ').trim();
@@ -30,7 +31,7 @@ function createDbMock(options = {}) {
           if (!existingObjects.has('domains')) {
             throw new Error('no such table: domains');
           }
-          return { results: [] };
+          return { results: domains };
         }
 
         if (/SELECT domain FROM domains/i.test(normalized)) {
@@ -47,7 +48,7 @@ function createDbMock(options = {}) {
           return { results: [] };
         }
 
-        if (/SELECT \* FROM accounts WHERE address = \? AND expires_at > datetime\("now"\)/i.test(normalized)) {
+        if (/SELECT \* FROM accounts WHERE address = \? AND .*expires_at/i.test(normalized)) {
           if (!existingObjects.has('accounts')) {
             throw new Error('no such table: accounts');
           }
@@ -257,4 +258,37 @@ test('email preserves simplified Chinese 8bit body bytes before charset decoding
 
   assert.equal(db.insertedMessages.length, 1);
   assert.equal(db.insertedMessages[0].text, '正文内容');
+});
+
+test('API timestamps are normalized from SQLite UTC to ISO 8601 UTC', async () => {
+  const db = createDbMock({
+    domains: [{
+      id: 'd1',
+      domain: 'example.com',
+      is_verified: 1,
+      created_at: '2024-06-01 08:30:00',
+    }],
+  });
+  const env = {
+    ACCESS_KEY: 'secret',
+    DB: db,
+    MAIL_KV: {
+      async get(key) {
+        return key === 'db_initialized' ? 'true' : null;
+      },
+      async put() {},
+    },
+  };
+
+  const response = await worker.fetch(
+    new Request('https://example.com/api/domains', {
+      headers: { 'X-Access-Key': 'secret' },
+    }),
+    env,
+    {},
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body['hydra:member'][0].createdAt, '2024-06-01T08:30:00.000Z');
 });

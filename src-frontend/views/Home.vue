@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useMailStore } from '@/stores/mail'
 import { useToastStore } from '@/stores/toast'
 import { api } from '@/services/api'
+import { parseUtcDate, formatRelativeTime, formatLocalDateTime } from '@/utils/datetime'
 import {
   Mail, RefreshCw, Clock, Copy, Trash2, Plus, LogOut, 
   Timer, Inbox, Paperclip, Download, X, ChevronRight,
@@ -30,9 +31,8 @@ const deletingAccount = ref(false)
 const formattedTime = computed(() => {
   timerTick.value
   if (!mailStore.expiresAt) return '30:00'
-  const now = Date.now()
-  const expires = new Date(mailStore.expiresAt).getTime()
-  const diff = Math.max(0, expires - now)
+  const expires = parseUtcDate(mailStore.expiresAt)
+  const diff = Math.max(0, (expires ? expires.getTime() : 0) - Date.now())
   const mins = Math.floor(diff / 60000)
   const secs = Math.floor((diff % 60000) / 1000)
   return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
@@ -331,21 +331,6 @@ function stopAutoRefresh() {
   }
 }
 
-function formatTime(dateStr) {
-  const date = new Date(dateStr)
-  const now = new Date()
-  const diff = now - date
-  
-  if (diff < 60000) return '刚刚'
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}分钟前`
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)}小时前`
-  return date.toLocaleDateString()
-}
-
-function formatDateTime(dateStr) {
-  return new Date(dateStr).toLocaleString('zh-CN')
-}
-
 function formatSize(bytes) {
   if (bytes < 1024) return bytes + ' B'
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
@@ -516,7 +501,7 @@ function getInitial(name) {
                     <span class="text-sm font-medium truncate" :class="mail.seen ? 'text-dark-300' : 'text-dark-100'">
                       {{ mail.from.name || mail.from.address }}
                     </span>
-                    <span class="text-xs text-dark-500 flex-shrink-0">{{ formatTime(mail.createdAt) }}</span>
+                    <span class="text-xs text-dark-500 flex-shrink-0">{{ formatRelativeTime(mail.createdAt) }}</span>
                   </div>
                   <div class="text-sm truncate" :class="mail.seen ? 'text-dark-500' : 'text-dark-300'">
                     {{ mail.subject || '(无主题)' }}
@@ -568,7 +553,7 @@ function getInitial(name) {
                 <div class="text-xs text-dark-500">{{ showMail.from.address }}</div>
               </div>
               <div class="ml-auto text-xs text-dark-500">
-                {{ formatDateTime(showMail.createdAt) }}
+                {{ formatLocalDateTime(showMail.createdAt) }}
               </div>
             </div>
           </div>

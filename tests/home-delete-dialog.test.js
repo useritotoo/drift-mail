@@ -14,3 +14,13 @@ test('Home view replaces browser confirm with an in-app delete dialog', async ()
   assert.match(source, /role="dialog"/);
   assert.match(source, /删除当前邮箱/);
 });
+
+test('Home view formats mail timestamps through UTC-aware helpers', async () => {
+  const source = await readFile(new URL('../src-frontend/views/Home.vue', import.meta.url), 'utf8');
+
+  assert.match(source, /from '@\/utils\/datetime'/);
+  assert.match(source, /formatRelativeTime\(mail\.createdAt\)/);
+  assert.match(source, /formatLocalDateTime\(showMail\.createdAt\)/);
+  assert.doesNotMatch(source, /new Date\(dateStr\)/);
+  assert.doesNotMatch(source, /new Date\(mailStore\.expiresAt\)/);
+});
